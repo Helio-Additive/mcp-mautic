@@ -9,6 +9,8 @@ export interface MauticEmail {
   plainText?: string;
   template?: string;
   emailType?: string;
+  language?: string;
+  category?: any;
   publishUp?: string;
   publishDown?: string;
   readCount?: number;

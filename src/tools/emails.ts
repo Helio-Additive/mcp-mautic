@@ -2,6 +2,20 @@ import type { MauticApiClient } from '../api/client.js';
 import type { ToolDefinition, ToolHandler } from '../types/index.js';
 import { buildMutationResult, buildPagination, hasValue, setLimitedParam, setParam } from './utils.js';
 
+function summarizeCategory(category: any): Record<string, unknown> | null {
+  if (!category) {
+    return null;
+  }
+
+  return {
+    id: category?.id,
+    title: category?.title,
+    alias: category?.alias,
+    bundle: category?.bundle,
+    color: category?.color,
+  };
+}
+
 function pct(numerator: number, denominator: number): number | null {
   if (!denominator) {
     return null;
@@ -32,6 +46,8 @@ function summarizeEmail(email: any): Record<string, unknown> {
     dateModified: email?.dateModified,
     createdByUser: email?.createdByUser,
     modifiedByUser: email?.modifiedByUser,
+    language: email?.language,
+    category: summarizeCategory(email?.category),
     fromAddress: email?.fromAddress,
     fromName: email?.fromName,
     replyToAddress: email?.replyToAddress,
@@ -83,6 +99,8 @@ function pickEmailPayload(args: any): Record<string, unknown> {
     'plainText',
     'emailType',
     'template',
+    'language',
+    'category',
     'isPublished',
     'publishUp',
     'publishDown',
@@ -207,6 +225,8 @@ export const toolDefinitions: ToolDefinition[] = [
         plainText: { type: 'string', description: 'Plain text content' },
         emailType: { type: 'string', enum: ['template', 'list'], description: 'Email type' },
         isPublished: { type: 'boolean', description: 'Publish immediately' },
+        language: { type: 'string', description: 'Email language/locale, for example zh_CN' },
+        category: { type: 'number', description: 'Category ID' },
       },
       required: ['name', 'subject'],
     },
@@ -227,6 +247,8 @@ export const toolDefinitions: ToolDefinition[] = [
         plainText: { type: 'string', description: 'Plain text content' },
         emailType: { type: 'string', enum: ['template', 'list'], description: 'Email type' },
         template: { type: 'string', description: 'Mautic email theme/template key' },
+        language: { type: 'string', description: 'Email language/locale, for example zh_CN' },
+        category: { type: 'number', description: 'Category ID' },
         isPublished: { type: 'boolean', description: 'Publication state' },
         publishUp: { type: 'string', description: 'Publish-up date/time' },
         publishDown: { type: 'string', description: 'Publish-down date/time' },
