@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.20
+
+- Exposed email `language` and `category` fields in `create_email_template` and `update_email`.
+- Added email language and category summaries to compact email output so metadata parity audits do not require raw email payloads.
+
 ## 0.1.19
 
 - Standardized remaining audited v1 mutation outputs around `success`, `action`, `id`, and an entity summary.

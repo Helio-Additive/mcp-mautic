@@ -166,8 +166,8 @@ SMS API classes have been removed in Mautic 7. The `list_sms` and `create_sms` t
 - **send_email** - Send emails to specific contacts
 - **list_emails** - Get all email templates and campaigns with optional compact/content output
 - **get_email** - Get detailed email information with content excluded by default
-- **create_email_template** - Create new email templates with normalized output
-- **update_email** - Update email metadata/content through the Mautic v1 edit endpoint
+- **create_email_template** - Create new email templates with normalized output, including language/category metadata
+- **update_email** - Update email metadata/content through the Mautic v1 edit endpoint, including language/category metadata
 - **delete_email** - Delete emails with explicit confirmation
 - **get_email_stats** - Get email performance statistics when the stats route is available
 - **send_email_to_segment** - Send email to segments (Mautic 7)
