@@ -3,7 +3,7 @@ import path from 'path';
 import axios from 'axios';
 import { MauticApiClient } from '../api/client.js';
 import type { ToolDefinition, ToolHandler } from '../types/index.js';
-import { buildMutationResult, buildPagination, hasValue, setLimitedParam, setParam } from './utils.js';
+import { buildMutationResult, buildPagination, hasValue, setLimitedParam, setNonNegativeParam, setParam } from './utils.js';
 
 function pickPayload(args: any, fields: string[]): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
@@ -293,7 +293,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   async list_webhooks(client: MauticApiClient, args: any) {
     const params: any = {};
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
 
     const response = await client.v1.get('/hooks', { params });
     const hooks = Object.fromEntries(
@@ -411,7 +411,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   async list_reports(client: MauticApiClient, args: any) {
     const params: any = {};
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
 
     const response = await client.v1.get('/reports', { params });
     const reports = Object.fromEntries(

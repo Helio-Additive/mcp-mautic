@@ -58,14 +58,19 @@ Helio tests this fork against Mautic 6.0.7. API v2 / Mautic 7 code remains prese
 
 - Audited v1 list/search tools return pagination metadata with `total`, `start`, `limit`, `count`, `hasMore`, and `nextStart`.
 - Audited v1 mutation tools return `success`, `action`, `id`, and a normalized entity summary such as `contact`, `campaign`, `segment`, `email`, or `file`.
-- Large content is excluded by default where it tends to bury agents: email bodies, page HTML, file contents, raw form builder internals, webhook secrets, and heavy report data require `includeContent` or `includeRaw` where available.
+- Large content is excluded by default where it tends to bury agents: nested campaign/contact/segment graphs, email bodies, page HTML, file contents, raw form builder internals, webhook secrets, and heavy report data require `includeContent` or `includeRaw` where available.
+- Email send tools are preview-first: use `preview_email_send` or `dryRun: true`, then pass `confirmSend: true` for live sends. Previews include readiness warnings for unpublished emails, missing/unresolved direct targets, sampled DNC contacts, and possible multi-segment double counting. Direct sends can request exhaustive contact ID validation with `requireFullReadinessCheck: true`.
+- High-impact contact/audience mutations are preview-first where audited. Live contact delete, segment delete, owner, DNC, segment membership, campaign membership, points, stage, tag, merge, reply-tracking, bulk upsert, SMS creation, company/category/tag/note creation, company membership, contact-field creation, and email send operations require explicit confirmation.
+- `bulk_upsert_contacts` supports bounded batch processing and optional post-upsert segment/tag assignment.
+- `find_duplicates` supports resumable scans and summary-only output for lower token use.
+- Generic email/campaign stats outputs are compact by default, with `includeRaw: true` for full Mautic payloads.
 - Mautic 6 does not expose `/emails/{id}/stats`; use `get_email_stats_v6` for aggregate counters and `get_email_graph_stats_v6` for web graph data.
 - The campaign trigger route is unavailable on Mautic 6.0.7; `execute_campaign` is guarded and returns a structured unsupported-route response.
 - Campaign clone/export/import use managed v1 flows that recreate metadata, sources, events, and canvas settings instead of relying on Mautic 7 import/export routes.
 - `update_campaign` is metadata-only. Use managed clone/import for structural event, source, form, or canvas changes.
 - Local asset creation uploads filesystem paths through `/files/media/new`, then creates the asset with the uploaded filename. Mautic 6 accepts file uploads to `media` or `images`.
 - New forms, assets, pages, webhooks, and reports default to unpublished unless `isPublished: true` is explicitly passed.
-- Destructive audited tools require confirmation where implemented, such as email, form, asset, page, webhook, report, and non-disposable campaign deletes.
+- Destructive audited tools require confirmation, such as contact, segment, email, form, asset, page, webhook, report, and non-disposable campaign deletes.
 
 Live-tested during this audit: contact name updates, segment contact fallback search, tag add/remove, segment remove/delete, campaign contact add/remove, campaign clone/export/import with segment/form/email automation, email update/delete/stats fallbacks, form create/update/delete/submissions, asset upload/create/update/delete, page create/update/delete, webhook create/update/delete, report create/update/delete, and paginated list outputs.
 
@@ -129,11 +134,14 @@ SMS API classes have been removed in Mautic 7. The `list_sms` and `create_sms` t
 - Secure credential management through environment variables
 - Dual API support: v1 (FOSRestBundle) and v2 (API Platform)
 
-### Contact Management (11 tools)
+### Contact Management (14 tools)
 - **create_contact** - Create new contacts with custom fields
 - **update_contact** - Update existing contact information
 - **get_contact** - Retrieve contact details by ID or email
 - **search_contacts** - Search contacts with filters and pagination
+- **bulk_upsert_contacts** - Dry-run-first chunked contact create/update by an upsert field
+- **find_duplicates** - Find likely duplicate contacts by grouping normalized field values
+- **merge_contacts** - Dry-run-first contact merge with managed copy mode by default and optional native Mautic UI merge mode
 - **get_contact_preferences** - Read contact DNC, frequency rules, owner, tags, segments, and campaigns
 - **delete_contact** - Remove contacts from Mautic
 - **assign_contact_owner** - Assign or clear a contact owner
@@ -143,8 +151,8 @@ SMS API classes have been removed in Mautic 7. The `list_sms` and `create_sms` t
 - **remove_contact_from_segment** - Remove contacts from specific segments
 
 ### Campaign Management (18 tools)
-- **list_campaigns** - Get all campaigns with optional compact output
-- **get_campaign** - Get detailed campaign information with optional compact output
+- **list_campaigns** - Get all campaigns with compact output by default
+- **get_campaign** - Get campaign information with compact output by default
 - **create_campaign** - Create new campaigns
 - **update_campaign** - Update campaign metadata and publication state; structural changes are rejected
 - **delete_campaign** - Delete campaigns; requires confirmation unless campaign is clearly disposable/test data
@@ -162,15 +170,16 @@ SMS API classes have been removed in Mautic 7. The `list_sms` and `create_sms` t
 - **get_campaign_email_metrics_v6** - Campaign email metrics by weekday or hour (Mautic 6)
 - **get_campaign_map_stats_v6** - Campaign geographic stats (Mautic 6)
 
-### Email Operations (12 tools)
-- **send_email** - Send emails to specific contacts
+### Email Operations (13 tools)
+- **send_email** - Preview or, with `confirmSend: true`, send emails to specific contacts
+- **preview_email_send** - Preview direct or segment email send reach without sending
 - **list_emails** - Get all email templates and campaigns with optional compact/content output
 - **get_email** - Get detailed email information with content excluded by default
 - **create_email_template** - Create new email templates with normalized output, including language/category metadata
 - **update_email** - Update email metadata/content through the Mautic v1 edit endpoint, including language/category metadata
 - **delete_email** - Delete emails with explicit confirmation
 - **get_email_stats** - Get email performance statistics when the stats route is available
-- **send_email_to_segment** - Send email to segments (Mautic 7)
+- **send_email_to_segment** - Preview or, with `confirmSend: true`, send email to assigned segments
 - **record_email_reply** - Record email reply by tracking hash (Mautic 7)
 - **get_email_graph_stats** - Email graph statistics (Mautic 7)
 - **get_email_stats_v6** - Email aggregate counters from the Mautic 6 email detail endpoint
@@ -184,10 +193,11 @@ SMS API classes have been removed in Mautic 7. The `list_sms` and `create_sms` t
 - **delete_form** - Delete forms with explicit confirmation
 - **get_form_submissions** - Get normalized form submission data
 
-### Segment Management (6 tools)
-- **list_segments** - Get all contact segments
+### Segment Management (7 tools)
+- **list_segments** - Get compact contact segment summaries
 - **create_segment** - Create new contact segments with filters
-- **get_segment** - Get contact segment details
+- **get_segment** - Get compact contact segment details
+- **get_segment_summary** - Get compact segment metadata and audience count without paging the full segment
 - **update_segment** - Update contact segment metadata and filters
 - **delete_segment** - Delete contact segments
 - **get_segment_contacts** - Get contacts in a specific segment

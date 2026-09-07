@@ -1,6 +1,6 @@
 import type { MauticApiClient } from '../api/client.js';
 import type { ToolDefinition, ToolHandler } from '../types/index.js';
-import { buildPagination, hasValue, setLimitedParam, setParam } from './utils.js';
+import { buildPagination, hasValue, setLimitedParam, setNonNegativeParam, setParam } from './utils.js';
 
 function summarizeForm(form: any): Record<string, unknown> {
   const fields = Array.isArray(form?.fields) ? form.fields : Object.values(form?.fields ?? {});
@@ -245,7 +245,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const params: any = {};
     setParam(params, 'search', args?.search);
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
     setParam(params, 'publishedOnly', args?.publishedOnly);
 
     const response = await client.v1.get('/forms', { params });
@@ -353,7 +353,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const { formId, limit, start, dateFrom, dateTo } = args;
     const params: any = {};
     setLimitedParam(params, 'limit', limit, 200);
-    setParam(params, 'start', start);
+    setNonNegativeParam(params, 'start', start);
     setParam(params, 'dateFrom', dateFrom);
     setParam(params, 'dateTo', dateTo);
 

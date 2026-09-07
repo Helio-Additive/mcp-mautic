@@ -10,14 +10,28 @@ export function setParam(params: Record<string, unknown>, key: string, value: un
 
 export function setLimitedParam(params: Record<string, unknown>, key: string, value: unknown, max: number): void {
   if (hasValue(value)) {
-    params[key] = Math.min(Number(value), max);
+    const numberValue = Math.floor(Number(value));
+    if (Number.isFinite(numberValue)) {
+      params[key] = Math.min(Math.max(numberValue, 1), max);
+    }
+  }
+}
+
+export function setNonNegativeParam(params: Record<string, unknown>, key: string, value: unknown): void {
+  if (hasValue(value)) {
+    const numberValue = Math.floor(Number(value));
+    if (Number.isFinite(numberValue)) {
+      params[key] = Math.max(numberValue, 0);
+    }
   }
 }
 
 export function buildPagination(total: unknown, start: unknown, limit: unknown, count: number): Record<string, unknown> {
   const totalNumber = Number(total ?? 0);
-  const startNumber = Number(start ?? 0);
-  const limitNumber = Number(limit ?? count);
+  const rawStartNumber = Number(start ?? 0);
+  const rawLimitNumber = Number(limit ?? count);
+  const startNumber = Number.isFinite(rawStartNumber) ? Math.max(Math.floor(rawStartNumber), 0) : 0;
+  const limitNumber = Number.isFinite(rawLimitNumber) ? Math.max(Math.floor(rawLimitNumber), 1) : Math.max(count, 1);
   const nextStart = startNumber + count;
 
   return {
@@ -43,6 +57,30 @@ export function buildMutationResult(
     id,
     [entityKey]: entity,
     ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== 'success')),
+  };
+}
+
+export function summarizePayload(value: unknown, depth = 2, maxKeys = 20): unknown {
+  if (depth <= 0 || value === null || value === undefined || typeof value !== 'object') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      type: 'array',
+      count: value.length,
+      sample: value.slice(0, 5).map(item => summarizePayload(item, depth - 1, maxKeys)),
+    };
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>);
+  return {
+    type: 'object',
+    keyCount: entries.length,
+    keys: entries.slice(0, maxKeys).map(([key]) => key),
+    values: Object.fromEntries(
+      entries.slice(0, maxKeys).map(([key, entryValue]) => [key, summarizePayload(entryValue, depth - 1, maxKeys)]),
+    ),
   };
 }
 

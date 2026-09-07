@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0
+
+- Changed high-volume contact, segment, campaign, field, activity, and business reads to return compact summaries by default, with `includeRaw: true` available for full Mautic payloads.
+- Added `get_segment_summary` for audience counts and optional small contact samples without paging full segments.
+- Added `preview_email_send` and dry-run behavior for `send_email` and `send_email_to_segment`.
+- Required `confirmSend: true` before live email send handlers post to Mautic.
+- Added dry-run-first `bulk_upsert_contacts` for chunked contact create/update workflows.
+- Added bounded bulk upsert batching plus optional post-upsert segment and tag assignment.
+- Added `find_duplicates` for contact duplicate grouping by normalized field values.
+- Added resumable and summary-only duplicate scans.
+- Added guarded `merge_contacts` for managed field/tag/segment/company copy into a surviving contact, with optional secondary deletion only when explicitly requested.
+- Added `merge_contacts.mergeMode: "native"` to call the authenticated Mautic UI merge flow with CSRF handling.
+- Added confirmation gates for contact/segment deletes and high-impact contact, campaign membership, point, stage, tag, DNC, owner, and reply-tracking mutations.
+- Added preview-first behavior for SMS, company, company membership, note, tag, category, and contact-field creation or association tools.
+- Added email send readiness warnings for unpublished emails, missing direct targets, unresolved direct targets, sampled DNC contacts, possible multi-segment double counting, and optional full direct-contact readiness checks.
+- Sanitized Mautic auth/token and top-level MCP error logging to avoid leaking OAuth secrets or authorization headers.
+- Changed managed contact merge live mode to report per-operation results and stop before secondary deletion if an earlier operation fails.
+- Changed SMS list/stat-like routes and generic email/campaign stats fallbacks to compact output by default, with `includeRaw: true` for full payloads.
+- Clamped audited v1 `limit` and `start` pagination inputs before sending requests to Mautic.
+
 ## 0.1.20
 
 - Exposed email `language` and `category` fields in `create_email_template` and `update_email`.

@@ -1,6 +1,6 @@
 import type { MauticApiClient } from '../api/client.js';
 import type { ToolDefinition, ToolHandler } from '../types/index.js';
-import { buildMutationResult, buildPagination, hasValue, setLimitedParam, setParam } from './utils.js';
+import { buildMutationResult, buildPagination, hasValue, normalizeContact, normalizeContacts, setLimitedParam, setNonNegativeParam, setParam, summarizePayload } from './utils.js';
 
 function summarizeCategory(category: any): Record<string, unknown> | null {
   if (!category) {
@@ -52,6 +52,37 @@ function summarizeEmail(email: any): Record<string, unknown> {
     fromName: email?.fromName,
     replyToAddress: email?.replyToAddress,
   };
+}
+
+function emailReadinessWarnings(email: any): string[] {
+  const warnings: string[] = [];
+
+  if (email?.isPublished === false) {
+    warnings.push('Email is unpublished.');
+  }
+
+  if (!email?.subject) {
+    warnings.push('Email subject is empty.');
+  }
+
+  return warnings;
+}
+
+function contactHasDnc(contact: any): boolean {
+  const dnc = contact?.doNotContact;
+  if (Array.isArray(dnc)) {
+    return dnc.length > 0;
+  }
+  if (dnc && typeof dnc === 'object') {
+    return Object.keys(dnc).length > 0;
+  }
+  return false;
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const numberValue = Math.floor(Number(value ?? fallback));
+  if (!Number.isFinite(numberValue)) return fallback;
+  return Math.min(Math.max(numberValue, min), max);
 }
 
 function stripEmailContent(email: any): Record<string, unknown> {
@@ -125,6 +156,204 @@ function normalizeEmailMutation(action: string, responseData: any, options: { mi
   };
 }
 
+function summarizeSegment(segment: any): Record<string, unknown> {
+  return {
+    id: segment?.id,
+    name: segment?.name,
+    alias: segment?.alias,
+    isPublished: segment?.isPublished,
+  };
+}
+
+function extractEmailSegments(email: any): any[] {
+  const candidates = [email?.lists, email?.segments, email?.list, email?.segment];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+    if (candidate && typeof candidate === 'object') {
+      return Object.values(candidate);
+    }
+  }
+
+  return [];
+}
+
+async function getContactByEmail(client: MauticApiClient, email: string): Promise<any | null> {
+  const response = await client.v1.get('/contacts', {
+    params: { search: `email:${email}`, limit: 1 },
+  });
+
+  if (Number(response.data.total ?? 0) === 0) {
+    return null;
+  }
+
+  return Object.values(response.data.contacts ?? {})[0] ?? null;
+}
+
+async function getContactById(client: MauticApiClient, id: number): Promise<any | null> {
+  try {
+    const response = await client.v1.get(`/contacts/${id}`);
+    return response.data.contact ?? null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function previewDirectEmailSend(client: MauticApiClient, args: any, email: any): Promise<Record<string, unknown>> {
+  const contactIds = Array.from(new Set<number>((args?.contactIds ?? []).map((id: unknown) => Number(id)).filter(Number.isFinite)));
+  const contactEmails = Array.from(new Set<string>((args?.contactEmails ?? []).map((email: unknown) => String(email).trim()).filter(Boolean)));
+  const sampleLimit = Math.min(Math.max(Number(args?.sampleLimit ?? 10), 0), 10);
+  const requireFullReadinessCheck = args?.requireFullReadinessCheck === true;
+  const maxDirectIdLookups = requireFullReadinessCheck
+    ? contactIds.length
+    : clampInteger(args?.maxPreviewContacts, 50, 1, 500);
+  const resolvedFromIds: any[] = [];
+  const unresolvedContactIds: number[] = [];
+  const resolvedFromEmails: any[] = [];
+  const unresolvedEmails: string[] = [];
+
+  for (const contactId of contactIds.slice(0, maxDirectIdLookups)) {
+    const contact = await getContactById(client, contactId);
+    if (contact) {
+      resolvedFromIds.push(contact);
+    } else {
+      unresolvedContactIds.push(contactId);
+    }
+  }
+
+  for (const emailAddress of contactEmails) {
+    const contact = await getContactByEmail(client, emailAddress);
+    if (contact) {
+      resolvedFromEmails.push(contact);
+    } else {
+      unresolvedEmails.push(emailAddress);
+    }
+  }
+
+  const resolvedContacts = [...resolvedFromIds, ...resolvedFromEmails];
+  const estimatedReach = new Set([
+    ...contactIds,
+    ...resolvedFromEmails.map((contact: any) => Number(contact?.id)).filter(Number.isFinite),
+  ]).size;
+  const sampledDncContacts = resolvedContacts.filter(contactHasDnc);
+  const warnings = [
+    ...emailReadinessWarnings(email),
+    ...(contactIds.length === 0 && contactEmails.length === 0 ? ['No direct contactIds or contactEmails were provided.'] : []),
+    ...(unresolvedContactIds.length ? ['Some contactIds could not be resolved during preview.'] : []),
+    ...(unresolvedEmails.length ? ['Some contactEmails could not be resolved during preview.'] : []),
+    ...(contactIds.length > maxDirectIdLookups ? [`Only the first ${maxDirectIdLookups} direct contactIds were checked for DNC/readiness.`] : []),
+  ];
+
+  return {
+    mode: 'direct_contacts',
+    email: summarizeEmail(email),
+    estimatedReach,
+    contactIds,
+    contactEmails,
+    unresolvedContactIds,
+    unresolvedEmails,
+    uncheckedContactIdCount: Math.max(contactIds.length - maxDirectIdLookups, 0),
+    readinessCheck: {
+      checkedContactIdCount: resolvedFromIds.length + unresolvedContactIds.length,
+      maxPreviewContacts: maxDirectIdLookups,
+      requireFullReadinessCheck,
+      fullReadinessChecked: contactIds.length <= maxDirectIdLookups,
+    },
+    sampleContacts: resolvedContacts.slice(0, sampleLimit).map(contact => normalizeContact(contact, args?.fields)),
+    readiness: {
+      canEstimateReach: true,
+      sampledDncCount: sampledDncContacts.length,
+      sampledDncContactIds: sampledDncContacts.map((contact: any) => contact?.id).filter(Boolean),
+      warnings,
+    },
+    warnings,
+    requiresConfirmation: true,
+    confirmation: {
+      tool: 'send_email',
+      requiredArgs: { emailId: args.emailId, confirmSend: true },
+    },
+  };
+}
+
+async function getSegmentAudiencePreview(
+  client: MauticApiClient,
+  segment: any,
+  sampleLimit: number,
+  fields?: string[],
+): Promise<Record<string, unknown>> {
+  if (!segment?.alias) {
+    return {
+      segment: summarizeSegment(segment),
+      audienceCount: null,
+      sampleContacts: [],
+      warning: 'segment_alias_unavailable',
+    };
+  }
+
+  const response = await client.v1.get('/contacts', {
+    params: {
+      search: `segment:${segment.alias}`,
+      limit: Math.max(sampleLimit, 1),
+    },
+  });
+
+  const rawContacts = Object.values(response.data.contacts ?? {});
+
+  return {
+    segment: summarizeSegment(segment),
+    audienceCount: Number(response.data.total ?? 0),
+    sampleContacts: sampleLimit > 0 ? normalizeContacts(response.data.contacts, fields).slice(0, sampleLimit) : [],
+    sampledDncCount: sampleLimit > 0 ? rawContacts.slice(0, sampleLimit).filter(contactHasDnc).length : 0,
+  };
+}
+
+async function previewSegmentEmailSend(client: MauticApiClient, args: any, email: any): Promise<Record<string, unknown>> {
+  const sampleLimit = Math.min(Number(args?.sampleLimit ?? 0), 10);
+  let segments = extractEmailSegments(email);
+
+  if (args?.segmentId !== undefined) {
+    const segmentResponse = await client.v1.get(`/segments/${args.segmentId}`);
+    segments = [segmentResponse.data.list];
+  }
+
+  const segmentPreviews = [];
+  for (const segment of segments) {
+    segmentPreviews.push(await getSegmentAudiencePreview(client, segment, sampleLimit, args?.fields));
+  }
+
+  const knownAudienceCounts = segmentPreviews
+    .map(preview => preview.audienceCount)
+    .filter((count): count is number => typeof count === 'number');
+
+  const warnings = [
+    ...emailReadinessWarnings(email),
+    ...(segments.length ? [] : ['No assigned segments found in the email payload. Pass segmentId to preview a specific segment.']),
+    ...(segments.length > 1 ? ['Estimated reach sums segment counts and may double-count contacts present in multiple segments.'] : []),
+  ];
+
+  return {
+    mode: 'assigned_segments',
+    email: summarizeEmail(email),
+    estimatedReach: knownAudienceCounts.length === segmentPreviews.length
+      ? knownAudienceCounts.reduce((sum, count) => sum + count, 0)
+      : null,
+    segments: segmentPreviews,
+    readiness: {
+      canEstimateReach: knownAudienceCounts.length === segmentPreviews.length,
+      sampledDncCount: segmentPreviews.reduce((sum, preview) => sum + Number(preview.sampledDncCount ?? 0), 0),
+      warnings,
+    },
+    warnings,
+    requiresConfirmation: true,
+    confirmation: {
+      tool: 'send_email_to_segment',
+      requiredArgs: { emailId: args.emailId, confirmSend: true },
+    },
+  };
+}
+
 function decodeHtmlEntities(value: string): string {
   return value
     .replace(/&quot;/g, '"')
@@ -179,7 +408,31 @@ export const toolDefinitions: ToolDefinition[] = [
         emailId: { type: 'number', description: 'Email template ID' },
         contactIds: { type: 'array', items: { type: 'number' }, description: 'Array of contact IDs' },
         contactEmails: { type: 'array', items: { type: 'string' }, description: 'Array of contact emails' },
+        sampleLimit: { type: 'number', description: 'Optional number of sample contacts to include during dry-run preview, maximum 10' },
+        maxPreviewContacts: { type: 'number', description: 'Maximum direct contactIds to resolve for readiness checks unless requireFullReadinessCheck is true; defaults to 50, maximum 500' },
+        requireFullReadinessCheck: { type: 'boolean', description: 'Resolve every direct contactId for readiness checks, regardless of maxPreviewContacts' },
+        dryRun: { type: 'boolean', description: 'Preview target resolution without sending' },
+        confirmSend: { type: 'boolean', description: 'Must be true to send live email' },
       },
+      required: ['emailId'],
+    },
+  },
+  {
+    name: 'preview_email_send',
+    description: 'Preview an email send target and reach estimate without sending',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        emailId: { type: 'number', description: 'Email ID' },
+        contactIds: { type: 'array', items: { type: 'number' }, description: 'Specific contact IDs for direct send preview' },
+        contactEmails: { type: 'array', items: { type: 'string' }, description: 'Specific contact emails for direct send preview' },
+        segmentId: { type: 'number', description: 'Optional segment ID for audience estimate' },
+        sampleLimit: { type: 'number', description: 'Optional number of sample contacts to include, maximum 10' },
+        maxPreviewContacts: { type: 'number', description: 'Maximum direct contactIds to resolve for readiness checks unless requireFullReadinessCheck is true; defaults to 50, maximum 500' },
+        requireFullReadinessCheck: { type: 'boolean', description: 'Resolve every direct contactId for readiness checks, regardless of maxPreviewContacts' },
+        fields: { type: 'array', items: { type: 'string' }, description: 'Contact field aliases to include in sample contacts' },
+      },
+      required: ['emailId'],
     },
   },
   {
@@ -277,6 +530,7 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         emailId: { type: 'number', description: 'Email ID' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic stats payload instead of compact summary' },
       },
       required: ['emailId'],
     },
@@ -290,6 +544,11 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         emailId: { type: 'number', description: 'Email ID (must be a segment/list email)' },
+        segmentId: { type: 'number', description: 'Optional segment ID for preview only; send still uses the email assigned segment(s)' },
+        sampleLimit: { type: 'number', description: 'Optional number of sample contacts to include during dry-run preview, maximum 10' },
+        fields: { type: 'array', items: { type: 'string' }, description: 'Contact field aliases to include in dry-run sample contacts' },
+        dryRun: { type: 'boolean', description: 'Preview assigned segment reach without sending' },
+        confirmSend: { type: 'boolean', description: 'Must be true to send live email' },
       },
       required: ['emailId'],
     },
@@ -301,6 +560,8 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         trackingHash: { type: 'string', description: 'The email tracking hash' },
+        dryRun: { type: 'boolean', description: 'Preview reply recording without mutating' },
+        confirmMutation: { type: 'boolean', description: 'Must be true to record the reply' },
       },
       required: ['trackingHash'],
     },
@@ -315,6 +576,7 @@ export const toolDefinitions: ToolDefinition[] = [
         isVariant: { type: 'boolean', description: 'Whether this is a variant email' },
         dateFrom: { type: 'string', description: 'Start date (YYYY-MM-DD)' },
         dateTo: { type: 'string', description: 'End date (YYYY-MM-DD)' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic graph stats payload instead of compact summary' },
       },
       required: ['emailId', 'dateFrom', 'dateTo'],
     },
@@ -348,7 +610,30 @@ export const toolDefinitions: ToolDefinition[] = [
 
 export const toolHandlers: Record<string, ToolHandler> = {
   async send_email(client: MauticApiClient, args: any) {
-    const { emailId, contactIds, contactEmails } = args;
+    const { emailId, contactIds, contactEmails, confirmSend } = args;
+    if (args?.dryRun === true || confirmSend !== true) {
+      const emailResponse = await client.v1.get(`/emails/${emailId}`);
+      const preview = await previewDirectEmailSend(client, args, emailResponse.data.email);
+      return {
+        content: [{ type: 'text', text: `Email send preview; no email was sent:\n${JSON.stringify(preview, null, 2)}` }],
+      };
+    }
+
+    const hasDirectTargets = (Array.isArray(contactIds) && contactIds.length > 0) || (Array.isArray(contactEmails) && contactEmails.length > 0);
+    if (!hasDirectTargets) {
+      const result = {
+        success: false,
+        action: 'send_rejected',
+        id: emailId,
+        reason: 'missing_direct_targets',
+        message: 'Pass contactIds or contactEmails before confirming a direct email send.',
+      };
+      return {
+        content: [{ type: 'text', text: `Email send rejected:\n${JSON.stringify(result, null, 2)}` }],
+        isError: true,
+      };
+    }
+
     const data: any = { id: emailId };
     if (contactIds) data.contactIds = contactIds;
     if (contactEmails) data.contactEmails = contactEmails;
@@ -365,11 +650,24 @@ export const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async preview_email_send(client: MauticApiClient, args: any) {
+    const emailResponse = await client.v1.get(`/emails/${args.emailId}`);
+    const email = emailResponse.data.email;
+    const hasDirectTargets = Array.isArray(args?.contactIds) || Array.isArray(args?.contactEmails);
+    const preview = hasDirectTargets
+      ? await previewDirectEmailSend(client, args, email)
+      : await previewSegmentEmailSend(client, args, email);
+
+    return {
+      content: [{ type: 'text', text: `Email send preview; no email was sent:\n${JSON.stringify(preview, null, 2)}` }],
+    };
+  },
+
   async list_emails(client: MauticApiClient, args: any) {
     const params: any = {};
     setParam(params, 'search', args?.search);
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
     setParam(params, 'publishedOnly', args?.publishedOnly);
 
     const response = await client.v1.get('/emails', { params });
@@ -456,8 +754,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const { emailId } = args;
     try {
       const response = await client.v1.get(`/emails/${emailId}/stats`);
+      const stats = args?.includeRaw === true ? response.data.stats ?? response.data : summarizePayload(response.data.stats ?? response.data);
       return {
-        content: [{ type: 'text', text: `Email statistics:\n${JSON.stringify(response.data.stats ?? response.data, null, 2)}` }],
+        content: [{ type: 'text', text: `Email statistics:\n${JSON.stringify(stats, null, 2)}` }],
       };
     } catch (error: any) {
       if (error?.response?.status === 404) {
@@ -481,7 +780,15 @@ export const toolHandlers: Record<string, ToolHandler> = {
 
   // NEW Mautic 7 handlers
   async send_email_to_segment(client: MauticApiClient, args: any) {
-    const { emailId } = args;
+    const { emailId, confirmSend } = args;
+    if (args?.dryRun === true || confirmSend !== true) {
+      const emailResponse = await client.v1.get(`/emails/${emailId}`);
+      const preview = await previewSegmentEmailSend(client, args, emailResponse.data.email);
+      return {
+        content: [{ type: 'text', text: `Segment email send preview; no email was sent:\n${JSON.stringify(preview, null, 2)}` }],
+      };
+    }
+
     const response = await client.v1.post(`/emails/${emailId}/send`);
     const result = buildMutationResult('sent_to_segment', emailId, 'delivery', {
       emailId,
@@ -494,6 +801,22 @@ export const toolHandlers: Record<string, ToolHandler> = {
 
   async record_email_reply(client: MauticApiClient, args: any) {
     const { trackingHash } = args;
+    const live = args?.dryRun === false && args?.confirmMutation === true;
+    if (!live) {
+      const result = {
+        success: true,
+        dryRun: true,
+        action: 'reply_record_preview',
+        id: trackingHash,
+        reply: { trackingHash },
+        requiresConfirmation: true,
+        confirmation: { tool: 'record_email_reply', requiredArgs: { dryRun: false, confirmMutation: true } },
+      };
+      return {
+        content: [{ type: 'text', text: `Email reply record preview; no reply was recorded:\n${JSON.stringify(result, null, 2)}` }],
+      };
+    }
+
     const response = await client.v1.post(`/emails/reply/${trackingHash}`);
     const result = buildMutationResult('reply_recorded', trackingHash, 'reply', {
       trackingHash,
@@ -526,8 +849,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const stats = args?.includeRaw === true ? response.data : summarizePayload(response.data);
     return {
-      content: [{ type: 'text', text: `Email ${emailId} stats (${dateFrom} to ${dateTo}):\n${JSON.stringify(response.data, null, 2)}` }],
+      content: [{ type: 'text', text: `Email ${emailId} stats (${dateFrom} to ${dateTo}):\n${JSON.stringify(stats, null, 2)}` }],
     };
   },
 
