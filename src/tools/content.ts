@@ -2,7 +2,7 @@ import { readFile } from 'fs/promises';
 import path from 'path';
 import type { MauticApiClient } from '../api/client.js';
 import type { ToolDefinition, ToolHandler } from '../types/index.js';
-import { buildMutationResult, buildPagination, hasValue, setLimitedParam, setParam } from './utils.js';
+import { buildMutationResult, buildPagination, hasValue, setLimitedParam, setNonNegativeParam, setParam } from './utils.js';
 
 function summarizeCategory(category: any): Record<string, unknown> | null {
   if (!category) return null;
@@ -318,6 +318,8 @@ export const toolDefinitions: ToolDefinition[] = [
       properties: {
         search: { type: 'string', description: 'Search term' },
         limit: { type: 'number', description: 'Number of results', maximum: 200 },
+        start: { type: 'number', description: 'Starting offset' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic SMS payloads instead of compact summaries' },
       },
     },
   },
@@ -329,7 +331,9 @@ export const toolDefinitions: ToolDefinition[] = [
       properties: {
         name: { type: 'string', description: 'SMS name' },
         message: { type: 'string', description: 'SMS message content' },
-        isPublished: { type: 'boolean', description: 'Publish immediately' },
+        isPublished: { type: 'boolean', description: 'Publish immediately; defaults to false when omitted' },
+        dryRun: { type: 'boolean', description: 'Preview SMS creation without mutating' },
+        confirmMutation: { type: 'boolean', description: 'Must be true to create the SMS template' },
       },
       required: ['name', 'message'],
     },
@@ -341,7 +345,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const params: any = {};
     setParam(params, 'search', args?.search);
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
     setParam(params, 'publishedOnly', args?.publishedOnly);
 
     const response = await client.v1.get('/assets', { params });
@@ -436,7 +440,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const params: any = {};
     setParam(params, 'search', args?.search);
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
     setParam(params, 'publishedOnly', args?.publishedOnly);
 
     const response = await client.v1.get('/pages', { params });
@@ -535,10 +539,22 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const params: any = {};
     setParam(params, 'search', args?.search);
     setLimitedParam(params, 'limit', args?.limit, 200);
+    setNonNegativeParam(params, 'start', args?.start);
 
     const response = await client.v1.get('/smses', { params });
+    const rawSmses = response.data.smses || response.data;
+    const smses = args?.includeRaw === true
+      ? rawSmses
+      : Object.fromEntries(
+          Object.entries(rawSmses ?? {}).map(([id, sms]) => [id, summarizeSms(sms)]),
+        );
+    const count = Array.isArray(smses) ? smses.length : Object.keys(smses ?? {}).length;
+    const result = {
+      pagination: buildPagination(response.data.total, params.start, params.limit, count),
+      smses,
+    };
     return {
-      content: [{ type: 'text', text: `[WARNING] SMS API is deprecated in Mautic 7. This endpoint may not work.\nFound ${response.data.total || 0} SMS templates:\n${JSON.stringify(response.data.smses || response.data, null, 2)}` }],
+      content: [{ type: 'text', text: `[WARNING] SMS API is deprecated in Mautic 7. This endpoint may not work.\nFound ${response.data.total || 0} SMS templates:\n${JSON.stringify(result, null, 2)}` }],
     };
   },
 
@@ -546,8 +562,24 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const payload: any = {
       name: args.name,
       message: args.message,
-      isPublished: args.isPublished !== undefined ? args.isPublished : true,
+      isPublished: args.isPublished ?? false,
     };
+
+    const live = args?.dryRun === false && args?.confirmMutation === true;
+    if (!live) {
+      const result = {
+        success: true,
+        dryRun: true,
+        action: 'sms_create_preview',
+        id: null,
+        sms: summarizeSms(payload),
+        requiresConfirmation: true,
+        confirmation: { tool: 'create_sms', requiredArgs: { dryRun: false, confirmMutation: true } },
+      };
+      return {
+        content: [{ type: 'text', text: `[WARNING] SMS API is deprecated in Mautic 7. This endpoint may not work.\nSMS template create preview; no SMS was created:\n${JSON.stringify(result, null, 2)}` }],
+      };
+    }
 
     const response = await client.v1.post('/smses/new', payload);
     const sms = summarizeSms(response.data.sms);

@@ -2,6 +2,23 @@ import axios, { AxiosInstance, AxiosError } from 'axios';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { OAuth2Token } from '../types/index.js';
 
+export function sanitizeErrorForLog(error: unknown): Record<string, unknown> | string {
+  if (!axios.isAxiosError(error)) {
+    return error instanceof Error ? { name: error.name, message: error.message } : String(error);
+  }
+
+  return {
+    name: error.name,
+    message: error.message,
+    method: error.config?.method,
+    url: error.config?.url,
+    baseURL: error.config?.baseURL,
+    status: error.response?.status,
+    statusText: error.response?.statusText,
+    response: error.response?.data,
+  };
+}
+
 export class MauticApiClient {
   public v1: AxiosInstance;
   public v2: AxiosInstance;
@@ -78,7 +95,7 @@ export class MauticApiClient {
               return instance.request(originalRequest);
             }
           } catch (refreshError) {
-            console.error('Token refresh failed:', refreshError);
+            console.error('Token refresh failed:', sanitizeErrorForLog(refreshError));
           }
         }
         return Promise.reject(error);
@@ -115,7 +132,7 @@ export class MauticApiClient {
         token_type: response.data.token_type || 'Bearer',
       };
     } catch (error) {
-      console.error('Failed to get access token:', error);
+      console.error('Failed to get access token:', sanitizeErrorForLog(error));
       throw new McpError(ErrorCode.InternalError, 'Failed to authenticate with Mautic API');
     }
   }
@@ -145,7 +162,7 @@ export class MauticApiClient {
         token_type: response.data.token_type || 'Bearer',
       };
     } catch (error) {
-      console.error('Failed to refresh token:', error);
+      console.error('Failed to refresh token:', sanitizeErrorForLog(error));
       await this.getAccessToken();
     }
   }

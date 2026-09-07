@@ -24,7 +24,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from 'axios';
 
-import { MauticApiClient } from './api/client.js';
+import { MauticApiClient, sanitizeErrorForLog } from './api/client.js';
 import { allToolDefinitions, dispatchTool } from './tools/index.js';
 
 // Environment variables for Mautic configuration
@@ -63,7 +63,7 @@ class MauticServer {
 
     this.setupToolHandlers();
 
-    this.server.onerror = (error) => console.error('[MCP Error]', error);
+    this.server.onerror = (error) => console.error('[MCP Error]', sanitizeErrorForLog(error));
     process.on('SIGINT', async () => {
       await this.server.close();
       process.exit(0);
@@ -106,4 +106,4 @@ class MauticServer {
 }
 
 const server = new MauticServer();
-server.run().catch(console.error);
+server.run().catch(error => console.error('Mautic MCP server failed:', sanitizeErrorForLog(error)));

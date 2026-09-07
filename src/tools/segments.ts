@@ -1,7 +1,7 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { MauticApiClient } from '../api/client.js';
 import type { ToolDefinition, ToolHandler } from '../types/index.js';
-import { buildMutationResult, buildPagination, normalizeContacts, setLimitedParam, setParam } from './utils.js';
+import { buildMutationResult, buildPagination, normalizeContacts, setLimitedParam, setNonNegativeParam, setParam } from './utils.js';
 
 function summarizeSegment(segment: any): Record<string, unknown> {
   return {
@@ -29,6 +29,7 @@ export const toolDefinitions: ToolDefinition[] = [
         limit: { type: 'number', description: 'Number of results', maximum: 200 },
         start: { type: 'number', description: 'Starting offset' },
         publishedOnly: { type: 'boolean', description: 'Only published segments' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic segment payloads instead of compact summaries' },
       },
     },
   },
@@ -55,8 +56,23 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         id: { type: 'number', description: 'Segment ID' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic segment payload instead of compact summary' },
       },
       required: ['id'],
+    },
+  },
+  {
+    name: 'get_segment_summary',
+    description: 'Get compact segment metadata and audience count without paging the full segment',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        segmentId: { type: 'number', description: 'Segment ID' },
+        sampleLimit: { type: 'number', description: 'Optional number of sample contacts to include, maximum 10' },
+        fields: { type: 'array', items: { type: 'string' }, description: 'Contact field aliases to include in samples' },
+        includeFilters: { type: 'boolean', description: 'Include raw segment filters for audit/preview use' },
+      },
+      required: ['segmentId'],
     },
   },
   {
@@ -78,13 +94,14 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'delete_segment',
-    description: 'Delete a contact segment',
+    description: 'Delete a contact segment; requires explicit confirmation',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'number', description: 'Segment ID' },
+        confirmDelete: { type: 'boolean', description: 'Must be true to delete the segment' },
       },
-      required: ['id'],
+      required: ['id', 'confirmDelete'],
     },
   },
   {
@@ -110,14 +127,19 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const params: any = {};
     setParam(params, 'search', args?.search);
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
     setParam(params, 'publishedOnly', args?.publishedOnly);
 
     const response = await client.v1.get('/segments', { params });
-    const lists = response.data.lists ?? {};
+    const rawSegments = response.data.lists ?? {};
+    const segments = args?.includeRaw === true
+      ? rawSegments
+      : Object.fromEntries(
+          Object.entries(rawSegments).map(([id, segment]) => [id, summarizeSegment(segment)]),
+        );
     const result = {
-      pagination: buildPagination(response.data.total, params.start, params.limit, Object.keys(lists).length),
-      segments: lists,
+      pagination: buildPagination(response.data.total, params.start, params.limit, Object.keys(segments).length),
+      segments,
     };
     return {
       content: [{ type: 'text', text: `Found ${response.data.total} segments:\n${JSON.stringify(result, null, 2)}` }],
@@ -136,8 +158,44 @@ export const toolHandlers: Record<string, ToolHandler> = {
   async get_segment(client: MauticApiClient, args: any) {
     const { id } = args;
     const response = await client.v1.get(`/segments/${id}`);
+    const segment = args?.includeRaw === true ? response.data.list : summarizeSegment(response.data.list);
     return {
-      content: [{ type: 'text', text: `Segment details:\n${JSON.stringify(response.data.list, null, 2)}` }],
+      content: [{ type: 'text', text: `Segment details:\n${JSON.stringify(segment, null, 2)}` }],
+    };
+  },
+
+  async get_segment_summary(client: MauticApiClient, args: any) {
+    const { segmentId, fields, includeFilters } = args;
+    const sampleLimit = Math.min(Number(args?.sampleLimit ?? 0), 10);
+    const segmentResponse = await client.v1.get(`/segments/${segmentId}`);
+    const segmentRaw = segmentResponse.data.list;
+    const segment = summarizeSegment(segmentRaw);
+
+    if (!segmentRaw?.alias) {
+      throw new McpError(ErrorCode.InvalidParams, `No segment alias found for segment ID ${segmentId}`);
+    }
+
+    const params = {
+      search: `segment:${segmentRaw.alias}`,
+      limit: Math.max(sampleLimit, 1),
+    };
+    const contactsResponse = await client.v1.get('/contacts', { params });
+    const sampleContacts = sampleLimit > 0
+      ? normalizeContacts(contactsResponse.data.contacts, fields).slice(0, sampleLimit)
+      : [];
+    const count = Array.isArray(sampleContacts) ? sampleContacts.length : Object.keys(sampleContacts ?? {}).length;
+    const result = {
+      segment: {
+        ...segment,
+        ...(includeFilters === true ? { filters: segmentRaw.filters ?? [] } : {}),
+      },
+      audienceCount: Number(contactsResponse.data.total ?? 0),
+      sampleContacts,
+      pagination: buildPagination(contactsResponse.data.total, 0, params.limit, count),
+    };
+
+    return {
+      content: [{ type: 'text', text: `Segment ${segmentRaw.alias} summary:\n${JSON.stringify(result, null, 2)}` }],
     };
   },
 
@@ -152,8 +210,23 @@ export const toolHandlers: Record<string, ToolHandler> = {
   },
 
   async delete_segment(client: MauticApiClient, args: any) {
-    const { id } = args;
+    const { id, confirmDelete } = args;
     const existing = await client.v1.get(`/segments/${id}`);
+
+    if (confirmDelete !== true) {
+      const result = {
+        success: false,
+        action: 'delete_rejected',
+        id,
+        reason: 'confirmation_required',
+        segment: summarizeSegment(existing.data.list),
+        message: 'Pass confirmDelete: true to delete this segment.',
+      };
+      return {
+        content: [{ type: 'text', text: `Segment delete rejected:\n${JSON.stringify(result, null, 2)}` }],
+      };
+    }
+
     await client.v1.delete(`/segments/${id}/delete`);
     const result = buildMutationResult('deleted', id, 'segment', summarizeSegment(existing.data.list));
     return {
@@ -165,7 +238,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const { segmentId, limit, start, minimal, fieldsOnly, fields } = args;
     const params: any = {};
     setLimitedParam(params, 'limit', limit, 200);
-    setParam(params, 'start', start);
+    setNonNegativeParam(params, 'start', start);
 
     const segmentsResponse = await client.v1.get('/segments', { params: { limit: 200 } });
     const segments = Object.values(segmentsResponse.data.lists ?? {}) as any[];
@@ -178,11 +251,12 @@ export const toolHandlers: Record<string, ToolHandler> = {
     params.search = `segment:${segment.alias}`;
 
     const response = await client.v1.get('/contacts', { params });
+    const includeRaw = args?.includeRaw === true || minimal === false;
     const contacts = fieldsOnly
       ? normalizeContacts(response.data.contacts, fields).map(contact => ({ id: contact.id, fields: contact.fields }))
-      : minimal
-        ? normalizeContacts(response.data.contacts, fields)
-        : response.data.contacts;
+      : includeRaw
+        ? response.data.contacts
+        : normalizeContacts(response.data.contacts, fields);
     const count = Array.isArray(contacts) ? contacts.length : Object.keys(contacts ?? {}).length;
     const result = {
       pagination: buildPagination(response.data.total, params.start, params.limit, count),

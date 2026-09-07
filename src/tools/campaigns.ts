@@ -1,6 +1,6 @@
 import type { MauticApiClient } from '../api/client.js';
 import type { ToolDefinition, ToolHandler } from '../types/index.js';
-import { buildMutationResult, buildPagination, normalizeContact, setLimitedParam, setParam } from './utils.js';
+import { buildMutationResult, buildPagination, normalizeContact, setLimitedParam, setNonNegativeParam, setParam, summarizePayload } from './utils.js';
 
 function decodeHtmlEntities(value: string): string {
   return value
@@ -567,10 +567,10 @@ export const toolDefinitions: ToolDefinition[] = [
         limit: { type: 'number', description: 'Number of results', maximum: 200 },
         start: { type: 'number', description: 'Starting offset' },
         publishedOnly: { type: 'boolean', description: 'Only published campaigns' },
-        minimal: { type: 'boolean', description: 'Return compact campaign summaries instead of full nested campaign payloads' },
-        includeEvents: { type: 'boolean', description: 'Include normalized event summaries when minimal is true' },
-        includeCanvas: { type: 'boolean', description: 'Include canvas settings when minimal is true' },
-        includeRaw: { type: 'boolean', description: 'Include raw Mautic campaign payload when minimal is true' },
+        minimal: { type: 'boolean', description: 'Return compact campaign summaries; compact output is the default unless includeRaw is true' },
+        includeEvents: { type: 'boolean', description: 'Include normalized event summaries in compact output' },
+        includeCanvas: { type: 'boolean', description: 'Include canvas settings in compact output' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic campaign payloads instead of compact summaries' },
       },
     },
   },
@@ -581,10 +581,10 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         id: { type: 'number', description: 'Campaign ID' },
-        minimal: { type: 'boolean', description: 'Return compact campaign summary instead of full nested campaign payload' },
-        includeEvents: { type: 'boolean', description: 'Include normalized event summaries when minimal is true' },
-        includeCanvas: { type: 'boolean', description: 'Include canvas settings when minimal is true' },
-        includeRaw: { type: 'boolean', description: 'Include raw Mautic campaign payload when minimal is true' },
+        minimal: { type: 'boolean', description: 'Return compact campaign summary; compact output is the default unless includeRaw is true' },
+        includeEvents: { type: 'boolean', description: 'Include normalized event summaries in compact output' },
+        includeCanvas: { type: 'boolean', description: 'Include canvas settings in compact output' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic campaign payload instead of compact summary' },
       },
       required: ['id'],
     },
@@ -644,6 +644,8 @@ export const toolDefinitions: ToolDefinition[] = [
       properties: {
         campaignId: { type: 'number', description: 'Campaign ID' },
         contactId: { type: 'number', description: 'Contact ID' },
+        dryRun: { type: 'boolean', description: 'Preview campaign membership add without mutating' },
+        confirmMutation: { type: 'boolean', description: 'Must be true to add contact to campaign' },
       },
       required: ['campaignId', 'contactId'],
     },
@@ -656,6 +658,8 @@ export const toolDefinitions: ToolDefinition[] = [
       properties: {
         campaignId: { type: 'number', description: 'Campaign ID' },
         contactId: { type: 'number', description: 'Contact ID' },
+        dryRun: { type: 'boolean', description: 'Preview campaign membership removal without mutating' },
+        confirmMutation: { type: 'boolean', description: 'Must be true to remove contact from campaign' },
       },
       required: ['campaignId', 'contactId'],
     },
@@ -775,7 +779,7 @@ export const toolDefinitions: ToolDefinition[] = [
         eventId: { type: 'number', description: 'Campaign event ID' },
         limit: { type: 'number', description: 'Number of results', maximum: 200 },
         start: { type: 'number', description: 'Starting offset' },
-        minimal: { type: 'boolean', description: 'Return compact event detail without raw form internals' },
+        minimal: { type: 'boolean', description: 'Return compact event detail without raw form internals; compact output is the default unless includeRaw is true' },
         includeRaw: { type: 'boolean', description: 'Include raw Mautic event payload when minimal is true' },
       },
       required: ['eventId'],
@@ -790,6 +794,7 @@ export const toolDefinitions: ToolDefinition[] = [
         campaignId: { type: 'number', description: 'Campaign ID' },
         dateFrom: { type: 'string', description: 'Start date (YYYY-MM-DD)' },
         dateTo: { type: 'string', description: 'End date (YYYY-MM-DD)' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic graph stats payload instead of compact summary' },
       },
       required: ['campaignId', 'dateFrom', 'dateTo'],
     },
@@ -803,6 +808,7 @@ export const toolDefinitions: ToolDefinition[] = [
         campaignId: { type: 'number', description: 'Campaign ID' },
         dateFrom: { type: 'string', description: 'Start date (YYYY-MM-DD)' },
         dateTo: { type: 'string', description: 'End date (YYYY-MM-DD)' },
+        includeRaw: { type: 'boolean', description: 'Return raw Mautic map stats payload instead of compact summary' },
       },
       required: ['campaignId', 'dateFrom', 'dateTo'],
     },
@@ -841,11 +847,11 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const params: any = {};
     setParam(params, 'search', args?.search);
     setLimitedParam(params, 'limit', args?.limit, 200);
-    setParam(params, 'start', args?.start);
+    setNonNegativeParam(params, 'start', args?.start);
     setParam(params, 'publishedOnly', args?.publishedOnly);
 
     const response = await client.v1.get('/campaigns', { params });
-    if (args?.minimal) {
+    if (args?.includeRaw !== true && args?.minimal !== false) {
       const campaigns = Object.values(response.data.campaigns ?? {}).map((campaign: any) =>
         normalizeCampaign(campaign, {
           includeEvents: args?.includeEvents === true,
@@ -875,7 +881,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   async get_campaign(client: MauticApiClient, args: any) {
     const { id } = args;
     const response = await client.v1.get(`/campaigns/${id}`);
-    if (args?.minimal) {
+    if (args?.includeRaw !== true && args?.minimal !== false) {
       const campaign = normalizeCampaign(response.data.campaign, {
         includeEvents: args?.includeEvents === true,
         includeCanvas: args?.includeCanvas === true,
@@ -966,6 +972,22 @@ export const toolHandlers: Record<string, ToolHandler> = {
 
   async add_contact_to_campaign(client: MauticApiClient, args: any) {
     const { campaignId, contactId } = args;
+    const live = args?.dryRun === false && args?.confirmMutation === true;
+    if (!live) {
+      const result = {
+        success: true,
+        dryRun: true,
+        action: 'added_to_campaign_preview',
+        id: contactId,
+        membership: { campaignId, contactId },
+        requiresConfirmation: true,
+        confirmation: { tool: 'add_contact_to_campaign', requiredArgs: { dryRun: false, confirmMutation: true } },
+      };
+      return {
+        content: [{ type: 'text', text: `Campaign membership add preview; no campaign membership was changed:\n${JSON.stringify(result, null, 2)}` }],
+      };
+    }
+
     await client.v1.post(`/campaigns/${campaignId}/contact/${contactId}/add`);
     const result = buildMutationResult('added_to_campaign', contactId, 'membership', { campaignId, contactId });
     return {
@@ -975,6 +997,22 @@ export const toolHandlers: Record<string, ToolHandler> = {
 
   async remove_contact_from_campaign(client: MauticApiClient, args: any) {
     const { campaignId, contactId } = args;
+    const live = args?.dryRun === false && args?.confirmMutation === true;
+    if (!live) {
+      const result = {
+        success: true,
+        dryRun: true,
+        action: 'removed_from_campaign_preview',
+        id: contactId,
+        membership: { campaignId, contactId },
+        requiresConfirmation: true,
+        confirmation: { tool: 'remove_contact_from_campaign', requiredArgs: { dryRun: false, confirmMutation: true } },
+      };
+      return {
+        content: [{ type: 'text', text: `Campaign membership removal preview; no campaign membership was changed:\n${JSON.stringify(result, null, 2)}` }],
+      };
+    }
+
     await client.v1.post(`/campaigns/${campaignId}/contact/${contactId}/remove`);
     const result = buildMutationResult('removed_from_campaign', contactId, 'membership', { campaignId, contactId });
     return {
@@ -1074,7 +1112,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   async get_campaign_contacts(client: MauticApiClient, args: any) {
     const { campaignId, start, limit, pageSize, includeContactDetails, minimal, fieldsOnly, fields } = args;
     const params: any = {};
-    setParam(params, 'start', start);
+    setNonNegativeParam(params, 'start', start);
     setLimitedParam(params, 'limit', limit ?? pageSize, includeContactDetails ? 50 : 200);
 
     const response = await client.v1.get(`/campaigns/${campaignId}/contacts`, { params });
@@ -1190,11 +1228,11 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const { eventId, limit, start } = args;
     const params: any = {};
     setLimitedParam(params, 'limit', limit, 200);
-    setParam(params, 'start', start);
+    setNonNegativeParam(params, 'start', start);
 
     const response = await client.v1.get(`/campaigns/events/${eventId}`, { params });
-    if (args?.minimal) {
-      const event = normalizeCampaignEvent(response.data.event ?? response.data, args?.includeRaw === true);
+    if (args?.includeRaw !== true) {
+      const event = normalizeCampaignEvent(response.data.event ?? response.data, false);
       return {
         content: [{ type: 'text', text: `Campaign event ${eventId} details:\n${JSON.stringify(event, null, 2)}` }],
       };
@@ -1216,8 +1254,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const stats = args?.includeRaw === true ? response.data : summarizePayload(response.data);
     return {
-      content: [{ type: 'text', text: `Campaign ${campaignId} stats (${dateFrom} to ${dateTo}):\n${JSON.stringify(response.data, null, 2)}` }],
+      content: [{ type: 'text', text: `Campaign ${campaignId} stats (${dateFrom} to ${dateTo}):\n${JSON.stringify(stats, null, 2)}` }],
     };
   },
 
@@ -1232,8 +1271,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const stats = args?.includeRaw === true ? response.data : summarizePayload(response.data);
     return {
-      content: [{ type: 'text', text: `Campaign ${campaignId} map stats (${dateFrom} to ${dateTo}):\n${JSON.stringify(response.data, null, 2)}` }],
+      content: [{ type: 'text', text: `Campaign ${campaignId} map stats (${dateFrom} to ${dateTo}):\n${JSON.stringify(stats, null, 2)}` }],
     };
   },
 
